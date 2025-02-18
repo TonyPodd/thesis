@@ -10,6 +10,7 @@ if __name__ == "__main__":
         ret, frame = cap.read()
         if not ret:
             break
+            continue
 
         gesture_text = gest_module.interpret_gesture(frame)
 
@@ -22,3 +23,4 @@ if __name__ == "__main__":
 
     cap.release()
     cv2.destroyAllWindows()
+    # exit()
