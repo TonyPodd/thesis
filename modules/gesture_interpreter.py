@@ -1,3 +1,5 @@
+# modules/gesture_interpreter.py
+
 import cv2
 import mediapipe as mp
 import math
@@ -20,11 +22,12 @@ class GestureInterpreter:
         )
         # Словарь для отслеживания состояния "готов к выстрелу" для каждой руки по её индексу.
         self.shoot_in_progress = {}
+        # Запомним предыдущий жест каждой руки, чтобы "отлавливать" появление нового
+        self.prev_gesture = {}
 
     def is_hand_open(self, hand_landmarks):
         """
-        Определяет, является ли рука «прямой ладошкой» (открытой),
-        анализируя положение 4 пальцев (без большого).
+        Проверяет «прямая ладошка» (4 пальца, кроме большого, направлены вверх).
         """
         landmarks = hand_landmarks.landmark
         finger_tips = [8, 12, 16, 20]
@@ -37,12 +40,10 @@ class GestureInterpreter:
 
     def is_ok_gesture(self, hand_landmarks):
         """
-        Определяет, является ли жест "ОК".
-        Проверяем, что кончики большого (4) и указательного (8) пальцев находятся близко,
-        а остальные пальцы вытянуты.
+        Проверяет, что кончики большого (4) и указательного (8) пальцев близко,
+        а указательный при этом «согнут», средний, безымянный и мизинец выпрямлены.
         """
         landmarks = hand_landmarks.landmark
-
         dx = landmarks[4].x - landmarks[8].x
         dy = landmarks[4].y - landmarks[8].y
         distance = math.hypot(dx, dy)
@@ -56,66 +57,99 @@ class GestureInterpreter:
         extended_ring   = landmarks[16].y < landmarks[14].y
         extended_pinky  = landmarks[20].y < landmarks[18].y
 
-        if ratio < 0.4 and bent_index and extended_middle and extended_ring and extended_pinky:
-            return True
-        return False
+        return (ratio < 0.4) and bent_index and extended_middle and extended_ring and extended_pinky
 
     def is_shoot_gesture(self, hand_landmarks):
         """
-        Определяет, находится ли рука в состоянии "готова к выстрелу":
-        указательный и средний пальцы выпрямлены, а безымянный и мизинец согнуты.
+        Готов к «выстрелу»: указательный и средний выпрямлены, безымянный и мизинец согнуты.
         """
         landmarks = hand_landmarks.landmark
-
         index_extended = landmarks[8].y < landmarks[6].y
         middle_extended = landmarks[12].y < landmarks[10].y
         ring_folded = landmarks[16].y > landmarks[14].y
         pinky_folded = landmarks[20].y > landmarks[18].y
-
-        if index_extended and middle_extended and ring_folded and pinky_folded:
-            return True
-        return False
+        return index_extended and middle_extended and ring_folded and pinky_folded
 
     def is_shoot_release(self, hand_landmarks):
         """
-        Определяет, что произошло "отпускание" выстрела – указательный и средний пальцы, ранее выпрямленные,
-        теперь сгибаются (кончики опускаются ниже своих PIP-соединений).
+        Отпускание выстрела – указательный и средний, ранее выпрямленные, теперь согнуты.
         """
         landmarks = hand_landmarks.landmark
-
         index_folded = landmarks[8].y > landmarks[6].y
         middle_folded = landmarks[12].y > landmarks[10].y
+        return index_folded and middle_folded
 
-        if index_folded and middle_folded:
-            return True
-        return False
+    def is_thumbs_up(self, hand_landmarks):
+        """
+        Простейшая проверка «палец вверх»: большой палец выше запястья,
+        остальные пальцы (указательный, средний, безымянный, мизинец) согнуты.
+        """
+        landmarks = hand_landmarks.landmark
+        # Запястье – точка 0
+        wrist_y = landmarks[0].y
+        # Кончик большого пальца – точка 4
+        thumb_tip_y = landmarks[4].y
+
+        # Проверяем, что большой палец «выше» (меньше y) запястья
+        thumb_up = thumb_tip_y < wrist_y
+
+        # Остальные пальцы считаем согнутыми, если tip.y > pip.y
+        # Указательный (tip=8, pip=6), Средний (12,10), Безымянный (16,14), Мизинец (20,18)
+        tips = [8, 12, 16, 20]
+        pips = [6, 10, 14, 18]
+        folded_fingers = 0
+        for tip, pip in zip(tips, pips):
+            if landmarks[tip].y > landmarks[pip].y:
+                folded_fingers += 1
+
+        return thumb_up and (folded_fingers == 4)
+
+    def is_thumbs_down(self, hand_landmarks):
+        """
+        Простейшая проверка «палец вниз»: большой палец ниже запястья,
+        остальные пальцы согнуты (аналогично thumbs_up, но big thumb_tip_y > wrist_y).
+        """
+        landmarks = hand_landmarks.landmark
+        wrist_y = landmarks[0].y
+        thumb_tip_y = landmarks[4].y
+
+        # Большой палец «ниже» (больше y) запястья
+        thumb_down = thumb_tip_y > wrist_y
+
+        tips = [8, 12, 16, 20]
+        pips = [6, 10, 14, 18]
+        folded_fingers = 0
+        for tip, pip in zip(tips, pips):
+            if landmarks[tip].y > landmarks[pip].y:
+                folded_fingers += 1
+
+        return thumb_down and (folded_fingers == 4)
 
     def interpret_gesture(self, frame):
         """
-        Принимает кадр BGR (numpy-массив OpenCV).
-        Для каждой обнаруженной руки (предположим, что каждая рука принадлежит отдельному человеку)
-        определяет жест:
-          - "Жест OK" – если обнаружен жест "ОК"
-          - "Готов к выстрелу" – если рука находится в состоянии выстрела (ожидание отпускания)
-          - "Выстрел выполнен!" – если произошло отпускание ранее выпрямленных пальцев
-          - "Прямая ладошка" – если рука открыта
-          - "Неопределённый жест" – если ни одно из условий не выполнено.
-        Рисует ключевые точки на кадре.
-        Возвращает строку с распознанными жестами для каждого человека.
+        Для каждой обнаруженной руки определяет жест из списка:
+         - Жест OK
+         - Готов к выстрелу / Выстрел выполнен!
+         - Прямая ладошка
+         - Палец вверх (мирный/да)
+         - Палец вниз (мафия/нет)
+         - Неопределённый жест
+
+        Возвращает список (idx -> строка жеста).
         """
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = self.hands.process(rgb_frame)
 
         persons_gestures = []
         if results.multi_hand_landmarks:
-            # Если количество рук меньше, чем в предыдущем кадре, удаляем неактуальные записи
+            # Синхронизируем shoot_in_progress с актуальным количеством рук
             active_indices = set(range(len(results.multi_hand_landmarks)))
             for key in list(self.shoot_in_progress.keys()):
                 if key not in active_indices:
                     del self.shoot_in_progress[key]
 
             for idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
-                # Рисуем ключевые точки на изображении
+                # Рисуем ключевые точки
                 self.mp_drawing.draw_landmarks(
                     frame,
                     hand_landmarks,
@@ -123,26 +157,31 @@ class GestureInterpreter:
                 )
 
                 gesture = ""
-                # Если обнаружен жест "ОК", сбрасываем состояние выстрела для этого человека
-                if self.is_ok_gesture(hand_landmarks):
+
+                # 1) Сначала проверяем новые жесты: thumbs_up / thumbs_down
+                if self.is_thumbs_up(hand_landmarks):
+                    gesture = "Палец вверх"
+                    self.shoot_in_progress[idx] = False
+                elif self.is_thumbs_down(hand_landmarks):
+                    gesture = "Палец вниз"
+                    self.shoot_in_progress[idx] = False
+                # 2) Далее OK
+                elif self.is_ok_gesture(hand_landmarks):
                     gesture = "Жест OK"
-                    print(f"Человек {idx+1}: Жест OK обнаружен!")
                     self.shoot_in_progress[idx] = False
                 else:
-                    # Инициализируем состояние, если ранее его не было
+                    # Инициализируем состояние
                     if idx not in self.shoot_in_progress:
                         self.shoot_in_progress[idx] = False
 
-                    # Если ранее был зафиксирован жест "готов к выстрелу"
+                    # Логика с «выстрелом»
                     if self.shoot_in_progress[idx]:
                         if self.is_shoot_release(hand_landmarks):
                             gesture = "Выстрел выполнен!"
-                            print(f"Человек {idx+1}: Выстрел выполнен!")
                             self.shoot_in_progress[idx] = False
                         else:
                             gesture = "Готов к выстрелу"
                     else:
-                        # Если сейчас рука в положении "готова к выстрелу", зафиксируем это
                         if self.is_shoot_gesture(hand_landmarks):
                             self.shoot_in_progress[idx] = True
                             gesture = "Готов к выстрелу"
@@ -150,10 +189,11 @@ class GestureInterpreter:
                             gesture = "Прямая ладошка"
                         else:
                             gesture = "Неопределённый жест"
-                persons_gestures.append(f"Человек {idx+1}: {gesture}")
+
+                persons_gestures.append((idx, gesture))
         else:
-            persons_gestures.append("Нет рук")
+            # Если нет рук, вернём запись об этом
+            persons_gestures.append((-1, "Нет рук"))
             self.shoot_in_progress.clear()
 
-        # Можно разделить вывод по строкам или вывести в одной строке
-        return "\n".join(persons_gestures)
+        return persons_gestures

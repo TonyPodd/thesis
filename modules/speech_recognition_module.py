@@ -19,6 +19,8 @@ class SpeechRecognitionModule:
             print("Скажите что-нибудь...")
             audio_data = self.recognizer.listen(source)
 
+        # for i in range(1, 20)
+
         try:
             text = self.recognizer.recognize_google(audio_data, language=self.language)
             print(f"Распознанный текст: {text}")
